@@ -1,0 +1,1131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Product Studio — Data Graph Architecture v2</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f8fafc; color: #1e293b; }
+  .tab-active { color: #1e293b !important; border-bottom-color: #1e293b !important; font-weight: 600 !important; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+
+const { useState, useMemo } = React;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   GENERIC P&C WORKFLOW GENERATION MODEL
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// Universal P&C semantic domains — every product maps into these
+const PC_DOMAINS = [
+  { id: "identification", label: "Identification", icon: "🏢", order: 1,
+    description: "Who is the insured? Account-level identity, entity type, primary geography.",
+    universalFields: ["named_insured", "entity_type", "primary_state", "effective_date", "expiration_date", "new_renewal"],
+    scope: "account", widgetType: "form",
+  },
+  { id: "risk_units", label: "Risk Units", icon: "📍", order: 2,
+    description: "The repeating unit of risk. Every P&C product has exactly one primary risk unit type.",
+    examples: [
+      { lob: "Commercial Auto", unit: "Vehicle", fields: ["VIN", "year", "make", "model", "GVW", "use_class", "radius"] },
+      { lob: "Habitational GL", unit: "Location", fields: ["address", "zip", "stories", "crime_score", "LLC_name"] },
+      { lob: "Workers' Comp", unit: "Class Code", fields: ["class_code", "state", "payroll", "employee_count"] },
+      { lob: "Property", unit: "Location/Building", fields: ["address", "construction_type", "year_built", "occupancy", "TIV"] },
+      { lob: "BOP", unit: "Location", fields: ["address", "building_class", "BPP_limit", "revenue"] },
+    ],
+    scope: "per-unit", widgetType: "table",
+  },
+  { id: "exposures", label: "Exposure Base", icon: "📊", order: 3,
+    description: "Quantitative measures per risk unit that drive premium calculation. Always per-unit.",
+    examples: [
+      { lob: "Commercial Auto", measures: ["vehicle_count", "fleet_size", "cost_new"] },
+      { lob: "Habitational GL", measures: ["door_count", "sq_footage", "acreage", "bed_count"] },
+      { lob: "Workers' Comp", measures: ["payroll", "employee_count", "hours_worked"] },
+      { lob: "Property", measures: ["TIV", "building_value", "contents_value", "BI_value"] },
+    ],
+    scope: "per-unit", widgetType: "table",
+  },
+  { id: "coverages", label: "Coverages & Limits", icon: "🛡️", order: 4,
+    description: "Coverage selections, limits, and deductibles. Always a mix of account-level and per-unit.",
+    scopePattern: "Account-level coverages (policy aggregate, blanket endorsements) + per-unit coverages (occurrence limits, deductibles, location-specific exclusions).",
+    scope: "mixed", widgetType: "form + conditional table",
+  },
+  { id: "rating_mods", label: "Rating Modifications", icon: "⚖️", order: 5,
+    description: "Underwriter judgment factors and schedule modifications. Scope varies by LOB.",
+    examples: [
+      { lob: "Commercial Auto", factors: ["driver_safety_mod", "fleet_discount", "loss_free_credit"], scope: "per-vehicle + account" },
+      { lob: "Habitational GL", factors: ["all 8 UW risk factors"], scope: "all per-location" },
+      { lob: "Workers' Comp", factors: ["experience_mod", "schedule_credit", "ARAP"], scope: "account (bureau-driven)" },
+      { lob: "Property", factors: ["protective_devices", "sprinkler_credit", "cat_risk_factor"], scope: "per-building" },
+    ],
+    scope: "varies", widgetType: "table or form",
+  },
+  { id: "forms", label: "Forms & Endorsements", icon: "📄", order: 6,
+    description: "Policy forms with attachment logic, selection rules, and merge field mappings. Always comes after coverages because coverage selections drive form attachment.",
+    triggerPattern: "Mandatory forms attach always. Conditional forms attach when coverage toggles or field values meet criteria. Optional forms are UW-selected.",
+    scope: "account", widgetType: "checklist + conditional",
+  },
+  { id: "premium_review", label: "Premium & Quote", icon: "💰", order: 7,
+    description: "Rater outputs — premium breakdown by coverage line and risk unit. Always last. Always read-only.",
+    scope: "account", widgetType: "read-only summary",
+  },
+];
+
+// Generation heuristics — the rules the algorithm applies
+const GENERATION_HEURISTICS = [
+  {
+    id: "h1", name: "Risk Unit Detection", priority: 1,
+    rule: "Scan all data sources for array-cardinality sheets. The primary array sheet identifies the risk unit type. Its fields become the Risk Units step.",
+    input: "Rater schema with cardinality metadata",
+    output: "Risk unit type + fields + max items",
+    example: "Inputs_Loc (cardinality: array, maxItems: 10) → Risk unit = Location",
+  },
+  {
+    id: "h2", name: "Scope Partitioning", priority: 2,
+    rule: "Every field gets classified as account-scope or per-unit-scope. Account fields → form widgets. Per-unit fields → table widgets. Mixed-scope sources split into subsections.",
+    input: "Field scope metadata from schema + rater structure",
+    output: "Scope assignment per field",
+    example: "Coverages sheet has 8 account fields + 7 per-location fields → split into two widget groups",
+  },
+  {
+    id: "h3", name: "Semantic Domain Clustering", priority: 3,
+    rule: "Fields with the same semantic category group into the same step, even if they come from different data sources. Categories: identification, coverage, exposure, rating-factor, form-field.",
+    input: "Semantic category from schema mapping (core_column_id prefix)",
+    output: "Domain assignment per field",
+    example: "crime_score (from rater) + flood_zone (from API) → both go in Risk Units step because they're location attributes",
+  },
+  {
+    id: "h4", name: "Dependency Ordering", priority: 4,
+    rule: "If field A drives/conditions field B, A's step must come before B's step. Topological sort on the dependency graph determines step order.",
+    input: "Edge list from data graph",
+    output: "Partial ordering constraints",
+    example: "num_locations → Inputs_Loc → crime_score → habitability_exclusion. So: Overview → Locations → Coverages.",
+  },
+  {
+    id: "h5", name: "Form Trigger Resolution", priority: 5,
+    rule: "Forms attach after the step containing their trigger field. Mandatory forms always attach. Conditional forms get 'triggers' edges from the field that gates them.",
+    input: "Form attachment rules + coverage/field selection state",
+    output: "Form step with conditional annotations",
+    example: "blanket_ai toggle triggers CG 20 10 form → Forms step shows 'Attached when Blanket AI = ON'",
+  },
+  {
+    id: "h6", name: "Widget Type Inference", priority: 6,
+    rule: "Account-scope form fields → Form widget. Per-unit array fields → Table widget. Toggles/selects → Form with dropdowns. Read-only outputs → Summary card.",
+    input: "Scope + field type",
+    output: "Widget type per step",
+    example: "8 per-location risk factor dropdowns → Table widget with 8 columns × N location rows",
+  },
+  {
+    id: "h7", name: "Merge Field Binding", priority: 7,
+    rule: "Form template merge fields (e.g., {{account_name}}) resolve to graph nodes. Disconnected merge fields surface as warnings. The graph provides the single source of truth for what data populates form templates.",
+    input: "Form template merge fields + graph node IDs",
+    output: "Merge field → graph node mapping + disconnected field warnings",
+    example: "{{effective_date}} → maps to graph node 'effective_date' from Inputs sheet",
+  },
+];
+
+// PM Product Definition facets — the complete experience
+const PM_FACETS = [
+  {
+    id: "coverages_rating", label: "Coverages & Rating", icon: "🛡️",
+    description: "Coverage selections, limits/deductible options, risk factors, industry classes, exposure units. The business rules that define what this product offers and how it's priced.",
+    graphRelation: "Each coverage toggle adds/removes a graph node. Risk factor options configure node properties. All changes propagate to workflow generation.",
+    currentAnalog: "Partially exists in rater step widget configuration. Spread across multiple places today.",
+  },
+  {
+    id: "forms_documents", label: "Forms & Documents", icon: "📄",
+    description: "Which policy forms are available, when they attach (mandatory/conditional/optional), which merge fields map to which data, and how quote packages are assembled.",
+    graphRelation: "Forms are nodes in the graph with 'triggers' edges from coverage/field nodes. Merge fields are 'reads' edges from data nodes to form template slots. Attachment rules are conditional edges.",
+    currentAnalog: "Form configuration page (your screenshot 2) + quote template mapping page (your screenshot 1). Today these are disconnected from the rater config.",
+    subTabs: [
+      { label: "Form Library", desc: "Which forms are available for this product. ISO forms, bureau forms, carrier proprietary. Compliance type (mandatory/optional)." },
+      { label: "Attachment Rules", desc: "When does each form attach? Linked to graph: 'Attach CG 20 10 when blanket_ai = ON'. Today this is raw JSON — should be visual rule builder." },
+      { label: "Template Mapping", desc: "Merge fields in document templates → graph nodes. {{account_name}} → named_insured. {{per_project_aggregate_cap}} → per_loc_aggregate. Disconnected slots surface as warnings." },
+    ],
+  },
+  {
+    id: "eligibility", label: "Eligibility & Appetite", icon: "🎯",
+    description: "Outer bounds of what this product can write. State availability, class code restrictions, limit ranges, risk unit maximums. This is what gets filed with regulators.",
+    graphRelation: "Eligibility rules are constraint nodes in the graph that gate the entire product. They don't produce workflow steps — they produce triage rules that run before the UW ever sees the submission.",
+    currentAnalog: "Doesn't have a dedicated home today. Partially in Control Tower, partially implicit in rater structure.",
+  },
+  {
+    id: "uw_workflow", label: "UW Workflow", icon: "🔄",
+    description: "The generated sequential flow the underwriter walks through. Review step order, add custom steps, configure which fields appear where. Generated from the graph — PM adjusts, doesn't build from scratch.",
+    graphRelation: "100% derived from graph traversal. Every step corresponds to a cluster of graph nodes. Every field in a step is a graph node. Step order follows dependency edges. Widget type follows scope.",
+    currentAnalog: "Rater nav + rater steps with widgets (your screenshot 3). Today this is manually assembled by FDEs.",
+  },
+  {
+    id: "preview", label: "Preview & Test", icon: "👁️",
+    description: "Live preview of the UW-facing experience. Fill in sample data, see conditional logic fire, watch forms attach/detach, review premium calculations.",
+    graphRelation: "Renders the generated workflow with live data. Exercises the graph end-to-end.",
+    currentAnalog: "Preview toggle in rater configuration. Limited to individual step preview today.",
+  },
+];
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REACT COMPONENTS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function App() {
+  const [activeView, setActiveView] = useState("revised_split");
+
+  const views = [
+    { id: "revised_split", label: "Revised V2 Split" },
+    { id: "generic_algorithm", label: "Generic Generation Algorithm" },
+    { id: "pc_domains", label: "P&C Domain Model" },
+    { id: "forms_integration", label: "Forms & Documents" },
+    { id: "pm_experience", label: "Full PM Experience" },
+    { id: "progressive", label: "Progressive Generation" },
+    { id: "engineering", label: "Engineering Alignment" },
+    { id: "bridge", label: "The Loop (End-to-End)" },
+  ];
+
+  return (
+    <div style={{ minHeight: "100vh" }}>
+      <div style={{ background: "#1e293b", color: "white", padding: "20px 32px" }}>
+        <div style={{ maxWidth: 1280, margin: "0 auto" }}>
+          <div style={{ fontSize: 11, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Product Studio Architecture v2</div>
+          <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 6 }}>Data Graph as Product Definition</h1>
+          <p style={{ fontSize: 13, color: "#94a3b8", maxWidth: 800 }}>
+            v2: Tab ordering corrected, generic P&C generation algorithm, forms integrated, progressive generation with confidence scoring, feedback loop model.
+          </p>
+        </div>
+      </div>
+
+      <div style={{ background: "white", borderBottom: "1px solid #e2e8f0", padding: "0 32px", position: "sticky", top: 0, zIndex: 50 }}>
+        <div style={{ maxWidth: 1280, margin: "0 auto", display: "flex", gap: 0, overflowX: "auto" }}>
+          {views.map(v => (
+            <button key={v.id} onClick={() => setActiveView(v.id)} style={{
+              padding: "12px 16px", fontSize: 12, fontWeight: activeView === v.id ? 600 : 400,
+              color: activeView === v.id ? "#1e293b" : "#64748b", whiteSpace: "nowrap",
+              borderBottom: activeView === v.id ? "2px solid #1e293b" : "2px solid transparent",
+              background: "none", border: "none", cursor: "pointer",
+            }}>{v.label}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 1280, margin: "0 auto", padding: "32px" }}>
+        {activeView === "revised_split" && <RevisedSplitView />}
+        {activeView === "generic_algorithm" && <GenericAlgorithmView />}
+        {activeView === "pc_domains" && <PCDomainsView />}
+        {activeView === "forms_integration" && <FormsView />}
+        {activeView === "pm_experience" && <PMExperienceView />}
+        {activeView === "progressive" && <ProgressiveGenerationView />}
+        {activeView === "engineering" && <EngineeringAlignmentView />}
+        {activeView === "bridge" && <BridgeView />}
+      </div>
+    </div>
+  );
+}
+
+function Card({ children, style }) {
+  return <div style={{ background: "white", borderRadius: 12, border: "1px solid #e2e8f0", padding: 24, ...style }}>{children}</div>;
+}
+
+function ScopeBadge({ scope, small }) {
+  const colors = {
+    "account": { bg: "#f0fdf4", border: "#86efac", text: "#166534" },
+    "per-unit": { bg: "#f0f9ff", border: "#7dd3fc", text: "#0c4a6e" },
+    "per-location": { bg: "#f0f9ff", border: "#7dd3fc", text: "#0c4a6e" },
+    "mixed": { bg: "#faf5ff", border: "#c4b5fd", text: "#5b21b6" },
+    "varies": { bg: "#fffbeb", border: "#fde68a", text: "#92400e" },
+  };
+  const c = colors[scope] || colors["account"];
+  return <span style={{ display: "inline-flex", padding: small ? "2px 6px" : "3px 8px", borderRadius: 4, fontSize: small ? 10 : 11, fontWeight: 600, background: c.bg, color: c.text, border: `1px solid ${c.border}` }}>{scope}</span>;
+}
+
+function Callout({ color, icon, title, children }) {
+  const colors = { amber: { bg: "#fffbeb", border: "#fde68a", title: "#92400e", text: "#78350f" }, blue: { bg: "#eff6ff", border: "#bfdbfe", title: "#1e40af", text: "#1e3a5f" }, green: { bg: "#f0fdf4", border: "#bbf7d0", title: "#166534", text: "#14532d" }, red: { bg: "#fef2f2", border: "#fecaca", title: "#991b1b", text: "#7f1d1d" } };
+  const c = colors[color] || colors.amber;
+  return (
+    <div style={{ background: c.bg, border: `1px solid ${c.border}`, borderRadius: 8, padding: 16 }}>
+      <p style={{ fontSize: 13, fontWeight: 600, color: c.title, marginBottom: 6 }}>{icon} {title}</p>
+      <div style={{ fontSize: 12, color: c.text, lineHeight: 1.6 }}>{children}</div>
+    </div>
+  );
+}
+
+/* ─── Revised Split View ──────────────────────────────────────────────────── */
+
+function RevisedSplitView() {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      <Callout color="amber" icon="⚡" title="What changed from v1">
+        <p><strong>1.</strong> Tab ordering corrected: Schema Mapping moves before the Data Graph (it provides the semantic identity that makes dependency detection possible).</p>
+        <p style={{ marginTop: 4 }}><strong>2.</strong> "Product Config" relabeled — the PM's experience is the entire product definition, not one tab. Restructured into five facets: Coverages & Rating, Forms & Documents, Eligibility, UW Workflow, Preview.</p>
+        <p style={{ marginTop: 4 }}><strong>3.</strong> Forms and document templates integrated as a first-class facet with three sub-views: Form Library, Attachment Rules, Template Mapping.</p>
+      </Callout>
+
+      <Card>
+        <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 20 }}>Revised V2 Split — Corrected Flow</h2>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 48px 1fr", gap: 0, alignItems: "start" }}>
+          {/* FDE side */}
+          <div style={{ border: "2px solid #bfdbfe", borderRadius: 12, overflow: "hidden" }}>
+            <div style={{ background: "#1e40af", color: "white", padding: "12px 16px" }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>🔧 Rater Configuration</div>
+              <div style={{ fontSize: 11, color: "#93c5fd", marginTop: 2 }}>FDE / Technical Persona</div>
+            </div>
+            {[
+              { num: "1", tab: "Connect Rater", desc: "Upload Excel workbook. System parses sheets, detects cardinality (single/array/mixed/lookup), identifies field types and cell references.", output: "Raw data source nodes with fields and cardinality", color: "#3b82f6" },
+              { num: "2", tab: "Schema Mapping", desc: "Map rater fields → Federato schema (core_column_id). This gives each field semantic identity. System uses these mappings to auto-detect dependencies in the next step.", output: "Semantic identity per field → enables dependency detection", color: "#8b5cf6", changed: true },
+              { num: "3", tab: "Data Graph", desc: "Interactive dependency graph. System auto-detects edges using semantic mappings from step 2 (zip → geo API, industry class → lookup table, coverage → form trigger). FDE validates and adds edges the system can't infer.", output: "Complete dependency graph → source of truth", color: "#f59e0b", changed: true },
+            ].map(t => (
+              <div key={t.num} style={{ padding: 14, borderTop: "1px solid #e2e8f0", background: t.changed ? "#eff6ff" : "white" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <span style={{ width: 22, height: 22, borderRadius: "50%", background: t.color, color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700 }}>{t.num}</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>{t.tab}</span>
+                  {t.changed && <span style={{ fontSize: 9, background: "#fef3c7", color: "#92400e", padding: "2px 6px", borderRadius: 3, fontWeight: 600 }}>REORDERED</span>}
+                </div>
+                <p style={{ fontSize: 11, color: "#64748b", lineHeight: 1.6, marginBottom: 4 }}>{t.desc}</p>
+                <p style={{ fontSize: 10, color: "#3b82f6", fontWeight: 500 }}>→ {t.output}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Arrow */}
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingTop: 100 }}>
+            <div style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: "6px 4px", textAlign: "center" }}>
+              <div style={{ fontSize: 8, fontWeight: 700, color: "#92400e" }}>GRAPH</div>
+              <div style={{ fontSize: 14 }}>→</div>
+            </div>
+          </div>
+
+          {/* PM side */}
+          <div style={{ border: "2px solid #bbf7d0", borderRadius: 12, overflow: "hidden" }}>
+            <div style={{ background: "#166534", color: "white", padding: "12px 16px" }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>📦 Product Definition</div>
+              <div style={{ fontSize: 11, color: "#86efac", marginTop: 2 }}>PM Persona — the entire product</div>
+            </div>
+            {[
+              { num: "1", tab: "Coverages & Rating", desc: "Coverage toggles, limits/deductible options, risk factors, industry classes, exposure units. Every toggle mutates a graph node.", color: "#10b981" },
+              { num: "2", tab: "Forms & Documents", desc: "Form library, attachment rules (when forms include in quote), merge field mapping ({{effective_date}} → graph node). Disconnected fields surface as warnings.", color: "#f97316", isNew: true },
+              { num: "3", tab: "Eligibility", desc: "Appetite bounds: state availability, class restrictions, limit ranges, risk unit maximums. What gets filed with regulators. Gates submission triage.", color: "#8b5cf6", isNew: true },
+              { num: "4", tab: "UW Workflow", desc: "Generated from graph traversal. PM reviews step order, adds custom steps, adjusts field placement. Generation reasons annotated on each step.", color: "#0ea5e9" },
+              { num: "5", tab: "Preview", desc: "Live preview of UW-facing experience with sample data. Conditional logic fires, forms attach/detach, per-location sections repeat.", color: "#6b7280" },
+            ].map(t => (
+              <div key={t.num} style={{ padding: 14, borderTop: "1px solid #e2e8f0", background: t.isNew ? "#f0fdf4" : "white" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <span style={{ width: 22, height: 22, borderRadius: "50%", background: t.color, color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700 }}>{t.num}</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>{t.tab}</span>
+                  {t.isNew && <span style={{ fontSize: 9, background: "#dcfce7", color: "#166534", padding: "2px 6px", borderRadius: 3, fontWeight: 600 }}>NEW</span>}
+                </div>
+                <p style={{ fontSize: 11, color: "#64748b", lineHeight: 1.6 }}>{t.desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Card>
+
+      <Callout color="blue" icon="💡" title="Why Schema Mapping comes before the Data Graph">
+        <p>Schema mapping gives each rater field its semantic identity via core_column_id. Without it, the system can't auto-detect dependencies. For example: if the system knows field B4 maps to <code>operations_nbaccounts-main_zip_code</code>, it can infer a Geo API lookup edge. Without that mapping, B4 is just "a text field in cell B4" and the dependency is invisible.</p>
+        <p style={{ marginTop: 6 }}>Alternative consideration: schema mapping could be a <strong>property panel inside the graph view</strong> — click a node, see its schema binding. This merges steps 2+3 into one workspace. The FDE maps fields and builds edges in the same place. Worth prototyping both approaches.</p>
+      </Callout>
+    </div>
+  );
+}
+
+/* ─── Generic Algorithm View ──────────────────────────────────────────────── */
+
+function GenericAlgorithmView() {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      <Card>
+        <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Generic P&C Workflow Generation Algorithm</h2>
+        <p style={{ fontSize: 13, color: "#64748b", lineHeight: 1.6 }}>
+          This algorithm works for any standard P&C product — not just Habitational GL. It's based on universal structural patterns that all P&C products share: every product has identification, risk units, exposures, coverages, rating modifications, forms, and premium outputs. The algorithm discovers these from the data graph, not from LOB-specific logic.
+        </p>
+      </Card>
+
+      <Card>
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>The Seven Heuristics</h3>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {GENERATION_HEURISTICS.map((h, i) => (
+            <div key={h.id} style={{ border: "1px solid #e2e8f0", borderRadius: 8, padding: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <span style={{ width: 28, height: 28, borderRadius: "50%", background: "#1e293b", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, flexShrink: 0 }}>{h.priority}</span>
+                <div>
+                  <span style={{ fontSize: 14, fontWeight: 600 }}>{h.name}</span>
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 8 }}>
+                <div style={{ background: "#f8fafc", borderRadius: 6, padding: 10 }}>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase", marginBottom: 4 }}>Rule</div>
+                  <p style={{ fontSize: 11, color: "#475569", lineHeight: 1.5 }}>{h.rule}</p>
+                </div>
+                <div style={{ background: "#f0f9ff", borderRadius: 6, padding: 10 }}>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: "#0ea5e9", textTransform: "uppercase", marginBottom: 4 }}>Input → Output</div>
+                  <p style={{ fontSize: 11, color: "#0c4a6e", lineHeight: 1.5 }}><strong>In:</strong> {h.input}<br/><strong>Out:</strong> {h.output}</p>
+                </div>
+                <div style={{ background: "#fffbeb", borderRadius: 6, padding: 10 }}>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: "#92400e", textTransform: "uppercase", marginBottom: 4 }}>Example</div>
+                  <p style={{ fontSize: 11, color: "#78350f", lineHeight: 1.5 }}>{h.example}</p>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Callout color="green" icon="🔑" title="What makes this generic (not LOB-specific)">
+        <p>None of these heuristics reference "locations" or "vehicles" or "GL" by name. They operate on structural properties: <strong>cardinality</strong> (is this an array?), <strong>scope</strong> (account vs per-unit?), <strong>semantic category</strong> (from schema mapping), <strong>edge type</strong> (drives/conditions/triggers/lookup), and <strong>field type</strong> (select/number/toggle). The same algorithm produces a Vehicle Schedule step for Commercial Auto and a Locations step for Habitational GL — because both are array-cardinality, per-unit-scope data sources.</p>
+      </Callout>
+    </div>
+  );
+}
+
+/* ─── P&C Domains View ────────────────────────────────────────────────────── */
+
+function PCDomainsView() {
+  const [expandedDomain, setExpandedDomain] = useState(null);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      <Card>
+        <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Universal P&C Workflow Domains</h2>
+        <p style={{ fontSize: 13, color: "#64748b", lineHeight: 1.6, marginBottom: 16 }}>
+          Every P&C product decomposes into these seven domains. The generation algorithm maps graph nodes into domains, then domains into sequential steps. This is the intermediate representation between the graph and the workflow.
+        </p>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {PC_DOMAINS.map(d => {
+            const isOpen = expandedDomain === d.id;
+            return (
+              <div key={d.id} style={{ border: "1px solid #e2e8f0", borderRadius: 8, overflow: "hidden" }}>
+                <div onClick={() => setExpandedDomain(isOpen ? null : d.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: 14, cursor: "pointer", background: isOpen ? "#f8fafc" : "white" }}>
+                  <span style={{ width: 32, height: 32, borderRadius: "50%", background: "#1e293b", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>{d.icon}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 14, fontWeight: 600 }}>{d.order}. {d.label}</span>
+                      <ScopeBadge scope={d.scope} small />
+                      <span style={{ fontSize: 10, color: "#94a3b8", background: "#f1f5f9", padding: "2px 6px", borderRadius: 3 }}>Widget: {d.widgetType}</span>
+                    </div>
+                    <p style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{d.description}</p>
+                  </div>
+                  <span style={{ color: "#94a3b8", fontSize: 18 }}>{isOpen ? "▾" : "▸"}</span>
+                </div>
+                {isOpen && d.examples && (
+                  <div style={{ padding: "0 14px 14px 58px" }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: "#64748b", marginBottom: 8, textTransform: "uppercase" }}>By LOB</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 8 }}>
+                      {d.examples.map(ex => (
+                        <div key={ex.lob} style={{ padding: 10, background: "#f8fafc", borderRadius: 6, border: "1px solid #e2e8f0" }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: "#1e293b", marginBottom: 4 }}>{ex.lob}</div>
+                          {ex.unit && <div style={{ fontSize: 11, color: "#64748b" }}>Risk unit: <strong>{ex.unit}</strong></div>}
+                          {ex.fields && <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 4, fontFamily: "monospace" }}>{ex.fields.join(", ")}</div>}
+                          {ex.measures && <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 4, fontFamily: "monospace" }}>{ex.measures.join(", ")}</div>}
+                          {ex.factors && <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 4, fontFamily: "monospace" }}>{ex.factors.join(", ")}</div>}
+                          {ex.scope && <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 4 }}>Scope: {ex.scope}</div>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {isOpen && d.triggerPattern && (
+                  <div style={{ padding: "0 14px 14px 58px" }}>
+                    <div style={{ fontSize: 11, color: "#475569", lineHeight: 1.6, background: "#fffbeb", padding: 10, borderRadius: 6, border: "1px solid #fde68a" }}>
+                      <strong>Pattern:</strong> {d.triggerPattern}
+                    </div>
+                  </div>
+                )}
+                {isOpen && d.scopePattern && (
+                  <div style={{ padding: "0 14px 14px 58px" }}>
+                    <div style={{ fontSize: 11, color: "#475569", lineHeight: 1.6, background: "#f0f9ff", padding: 10, borderRadius: 6, border: "1px solid #bfdbfe" }}>
+                      <strong>Scope pattern:</strong> {d.scopePattern}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/* ─── Forms View ──────────────────────────────────────────────────────────── */
+
+function FormsView() {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      <Card>
+        <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Forms & Documents in the Graph</h2>
+        <p style={{ fontSize: 13, color: "#64748b", lineHeight: 1.6 }}>
+          Policy forms aren't separate from the data graph — they're nodes in it. A form template has three types of edges: <strong>trigger edges</strong> (when does this form attach?), <strong>read edges</strong> (which data populates its merge fields?), and <strong>compliance edges</strong> (is this form mandatory, conditional, or optional?).
+        </p>
+      </Card>
+
+      {/* Current vs proposed for forms */}
+      <Card>
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>Current State → Proposed</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+          <div style={{ border: "1px solid #e2e8f0", borderRadius: 8, padding: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#991b1b", marginBottom: 10 }}>Today (Your Screenshots)</div>
+            <div style={{ fontSize: 12, color: "#64748b", lineHeight: 1.7 }}>
+              <p style={{ marginBottom: 8 }}><strong>Quote Template (Screenshot 1):</strong> Policy Declaration with merge fields ({"{{account_name}}"}, {"{{effective_date}}"}, etc.) and a mapping panel on the right. "Disconnected Items" are merge fields that don't map to any slot. The Location Schedule uses {"{{location_number}}"}, {"{{address}}"}, {"{{city}}"}, {"{{state}}"}, {"{{zip_code}}"} — per-location merge fields.</p>
+              <p><strong>Form Configuration (Screenshot 2):</strong> Attachment Rules and Selection Rules as raw JSON code blocks. Form Compliance Requirement Type dropdown. Variability setting. Template binding. No visual connection to the rater fields that drive these rules.</p>
+            </div>
+          </div>
+          <div style={{ border: "1px solid #bbf7d0", borderRadius: 8, padding: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#166534", marginBottom: 10 }}>Proposed: Forms as Graph Nodes</div>
+            <div style={{ fontSize: 12, color: "#14532d", lineHeight: 1.7 }}>
+              <p style={{ marginBottom: 8 }}><strong>Merge fields resolve to graph nodes.</strong> {"{{account_name}}"} → named_insured node. {"{{effective_date}}"} → effective_date node. {"{{location_number}}"} → location array index. Disconnected merge fields appear as warnings because the graph has no matching node.</p>
+              <p style={{ marginBottom: 8 }}><strong>Attachment rules become visual edges.</strong> Instead of raw JSON, the PM sees: "Attach CG 20 10 when blanket_ai = ON" as a visual rule with the source field highlighted. The rule IS a conditional edge in the graph.</p>
+              <p><strong>Per-location merge fields auto-detect array scope.</strong> The Location Schedule section knows it repeats because its merge fields ({"{{address}}"}, {"{{zip_code}}"}) map to per-location graph nodes.</p>
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      {/* Three sub-views */}
+      <Card>
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>Forms & Documents — PM's Three Sub-Views</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
+          {[
+            {
+              num: "1", title: "Form Library", color: "#f97316",
+              desc: "Which forms are available for this product. ISO forms, bureau forms, carrier proprietary endorsements.",
+              details: [
+                "Form number, title, edition, LOB",
+                "Compliance type: Mandatory (M) / Conditional (C) / Optional (O)",
+                "State availability: country-wide or specific states",
+                "Premium bearing: yes/no",
+                "Variability: fixed or variable content",
+              ],
+              graphConnection: "Each form is a node in the graph. Mandatory forms have no inbound trigger edges — they always attach. Conditional/optional forms have trigger edges from field nodes.",
+            },
+            {
+              num: "2", title: "Attachment Rules", color: "#ef4444",
+              desc: "When does each form attach? Visual rule builder replaces raw JSON. Rules are edges in the dependency graph.",
+              details: [
+                "IF blanket_ai = ON → attach CG 20 10",
+                "IF ebl_limit > 0 → attach EBL Endorsement",
+                "IF state IN [CA, NY, FL] → attach state-specific forms",
+                "IF any location has crime_score ≥ 80 → attach SAM Exclusion",
+              ],
+              graphConnection: "Each rule is a 'triggers' edge from a field node to a form node. When the PM creates a rule, they're adding an edge to the graph. The workflow generator uses these edges to determine which forms appear in the Forms step.",
+            },
+            {
+              num: "3", title: "Template Mapping", color: "#8b5cf6",
+              desc: "Merge fields in document templates → graph nodes. The template is a consumer of the graph.",
+              details: [
+                "{{account_name}} → named_insured (account scope)",
+                "{{effective_date}} → effective_date (account scope)",
+                "{{address}} → street_address (per-location scope → repeats)",
+                "{{per_project_aggregate_cap}} → per_loc_aggregate (per-location)",
+                "Disconnected fields = graph has no matching node → warning",
+              ],
+              graphConnection: "Merge fields are 'reads' edges from form template slots to data graph nodes. Per-location merge fields automatically create repeating sections in the template because the graph knows the source node has array cardinality.",
+            },
+          ].map(s => (
+            <div key={s.num} style={{ border: "1px solid #e2e8f0", borderRadius: 8, overflow: "hidden", borderTop: `3px solid ${s.color}` }}>
+              <div style={{ padding: 14 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                  <span style={{ width: 22, height: 22, borderRadius: "50%", background: s.color, color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700 }}>{s.num}</span>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{s.title}</span>
+                </div>
+                <p style={{ fontSize: 11, color: "#64748b", lineHeight: 1.5, marginBottom: 10 }}>{s.desc}</p>
+                <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 10 }}>
+                  {s.details.map((d, i) => (
+                    <div key={i} style={{ fontSize: 10, color: "#475569", padding: "3px 8px", background: "#f8fafc", borderRadius: 4, fontFamily: d.startsWith("IF") || d.startsWith("{{") ? "monospace" : "inherit" }}>{d}</div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 10, color: "#3b82f6", lineHeight: 1.5, padding: 8, background: "#eff6ff", borderRadius: 6 }}>
+                  <strong>Graph connection:</strong> {s.graphConnection}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/* ─── PM Experience View ──────────────────────────────────────────────────── */
+
+function PMExperienceView() {
+  const [activeFacet, setActiveFacet] = useState("coverages_rating");
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      <Card>
+        <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>The PM's Complete Product Definition Experience</h2>
+        <p style={{ fontSize: 13, color: "#64748b", lineHeight: 1.6, marginBottom: 16 }}>
+          "Product Config" was too narrow. The PM's entire side of Product Studio IS the product definition. Five facets, each a view into the same underlying data graph. Click a facet to see its details.
+        </p>
+
+        <div style={{ display: "flex", gap: 4, marginBottom: 20, background: "#f1f5f9", borderRadius: 8, padding: 4 }}>
+          {PM_FACETS.map(f => (
+            <button key={f.id} onClick={() => setActiveFacet(f.id)} style={{
+              flex: 1, padding: "10px 8px", fontSize: 11, fontWeight: activeFacet === f.id ? 600 : 400, textAlign: "center",
+              background: activeFacet === f.id ? "white" : "transparent",
+              color: activeFacet === f.id ? "#1e293b" : "#64748b",
+              border: activeFacet === f.id ? "1px solid #e2e8f0" : "1px solid transparent",
+              borderRadius: 6, cursor: "pointer",
+            }}>
+              <div style={{ fontSize: 18, marginBottom: 4 }}>{f.icon}</div>
+              {f.label}
+            </button>
+          ))}
+        </div>
+
+        {PM_FACETS.filter(f => f.id === activeFacet).map(f => (
+          <div key={f.id} style={{ border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+              <span style={{ fontSize: 24 }}>{f.icon}</span>
+              <h3 style={{ fontSize: 16, fontWeight: 700 }}>{f.label}</h3>
+            </div>
+            <p style={{ fontSize: 13, color: "#475569", lineHeight: 1.6, marginBottom: 12 }}>{f.description}</p>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+              <div style={{ background: "#f0f9ff", borderRadius: 6, padding: 12 }}>
+                <div style={{ fontSize: 10, fontWeight: 600, color: "#0c4a6e", textTransform: "uppercase", marginBottom: 4 }}>Graph Relationship</div>
+                <p style={{ fontSize: 11, color: "#0c4a6e", lineHeight: 1.5 }}>{f.graphRelation}</p>
+              </div>
+              <div style={{ background: "#f8fafc", borderRadius: 6, padding: 12 }}>
+                <div style={{ fontSize: 10, fontWeight: 600, color: "#64748b", textTransform: "uppercase", marginBottom: 4 }}>Current Analog</div>
+                <p style={{ fontSize: 11, color: "#475569", lineHeight: 1.5 }}>{f.currentAnalog}</p>
+              </div>
+            </div>
+
+            {f.subTabs && (
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "#64748b", textTransform: "uppercase", marginBottom: 8 }}>Sub-Views</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {f.subTabs.map((st, i) => (
+                    <div key={i} style={{ padding: 10, background: "#fff7ed", borderRadius: 6, border: "1px solid #fed7aa" }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: "#9a3412", marginBottom: 4 }}>{st.label}</div>
+                      <p style={{ fontSize: 11, color: "#7c2d12", lineHeight: 1.5 }}>{st.desc}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </Card>
+
+      <Callout color="green" icon="🎯" title="The PM never sees the graph — but everything they touch is the graph">
+        <p>When a PM toggles "Blanket Additional Insured" ON, they're adding a node to the graph. When they create a form attachment rule "attach CG 20 10 when blanket_ai = ON," they're adding an edge. When they reorder a workflow step, they're adding a manual ordering constraint. The graph is the engine room; the PM works in business language on the bridge.</p>
+      </Callout>
+    </div>
+  );
+}
+
+/* ─── Engineering Alignment View ──────────────────────────────────────────── */
+
+function EngineeringAlignmentView() {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      <Card>
+        <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Engineering Alignment: Jesse's productGraph ↔ Prototype</h2>
+        <p style={{ fontSize: 13, color: "#64748b", lineHeight: 1.6 }}>
+          Jesse's <code style={{ background: "#f1f5f9", padding: "1px 4px", borderRadius: 3, fontSize: 12 }}>productGraph</code> model validates the data-graph-as-product-definition thesis and gives us the implementation vocabulary. This tab maps every prototype concept to its engineering counterpart.
+        </p>
+      </Card>
+
+      {/* Core mapping table */}
+      <Card>
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>Concept Mapping</h3>
+        <div style={{ overflow: "hidden", borderRadius: 8, border: "1px solid #e2e8f0" }}>
+          <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "#1e293b", color: "white" }}>
+                <th style={{ textAlign: "left", padding: "10px 14px", fontWeight: 600, fontSize: 11 }}>Prototype Concept</th>
+                <th style={{ textAlign: "left", padding: "10px 14px", fontWeight: 600, fontSize: 11 }}>Jesse's Engineering Model</th>
+                <th style={{ textAlign: "left", padding: "10px 14px", fontWeight: 600, fontSize: 11 }}>Alignment</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { proto: "Data Graph (source of truth)", eng: "productGraph({ entities }) with named Zod schemas", align: "exact", note: "Same concept. The graph declares all entities and their relationships." },
+                { proto: "Data source nodes (rater, DB, API, forms)", eng: "Entities in the graph — each with a Zod schema", align: "exact", note: "Our source nodes are his entities. Zod schemas formalize the field definitions we show in the Field Inventory." },
+                { proto: "'maps' edges (API → rater field)", eng: ".derive(entity, { from, to, transform })", align: "exact", note: "Derivations are computed fields from other entities. Our maps edges are derivations." },
+                { proto: "'lookup' edges (zip → Geo API)", eng: ".compute(name, { executor, assembleInput })", align: "exact", note: "Computations are external calls. Our lookup edges trigger executors (rater engine, Geo API)." },
+                { proto: "'conditions' edges (crime score → exclusion)", eng: ".constraints(entries) — field-level validation", align: "close", note: "Our conditions edges map to constraints. But constraints are also used for input validation (min/max), which we haven't prototyped." },
+                { proto: "'triggers' edges (coverage → form attachment)", eng: ".guidance(entries) — UW rules & recommendations", align: "partial", note: "Form triggers are a subset of guidance. Jesse's guidance is broader — includes UW recommendations, not just form attachment logic." },
+                { proto: "Schema Mapping (field → core_column_id)", eng: "assembleInput / assembleOutput mapping functions", align: "close", note: "Our schema mapping is the static binding. His assemble functions are typed runtime transforms that map entities to executor/writer schemas." },
+                { proto: "Field Inventory (all fields + definitions)", eng: "describeRunner() → RunnerDescriptor (JSON)", align: "exact", note: "RunnerDescriptor outputs schemas, sources, and graph metadata. That's our Field Inventory as a serializable JSON." },
+                { proto: "Generated UW Workflow", eng: "runnerToForm() → FormDescriptor (JSON)", align: "exact", note: "FormDescriptor produces editable sections, read-only sections, computed previews, guidance, constraints. This IS the generated workflow." },
+                { proto: "Account vs per-location scope", eng: "from.caller() vs from.mechModel() entity sources", align: "close", note: "caller = user-editable (UW fills in). mechModel = DB-sourced (system populates). Scope determines which resolve binding an entity gets." },
+                { proto: "Confidence scoring (green/yellow/red)", eng: "Not in Jesse's model yet", align: "gap", note: "Progressive generation with confidence is a PM-facing concept. Engineering model doesn't need it — it either compiles or doesn't." },
+                { proto: "Coverage toggle → workflow regeneration", eng: "Graph mutation → runnerToForm() re-execution", align: "exact", note: "Same loop. PM mutates graph (toggles coverage node), system re-runs runnerToForm(), workflow updates." },
+              ].map((row, i) => (
+                <tr key={i} style={{ borderTop: "1px solid #e2e8f0" }}>
+                  <td style={{ padding: "10px 14px", fontWeight: 500, color: "#1e293b" }}>{row.proto}</td>
+                  <td style={{ padding: "10px 14px", fontFamily: "monospace", fontSize: 11, color: "#475569" }}>{row.eng}</td>
+                  <td style={{ padding: "10px 14px" }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{
+                        display: "inline-block", fontSize: 10, padding: "2px 8px", borderRadius: 4, fontWeight: 600, width: "fit-content",
+                        background: row.align === "exact" ? "#dcfce7" : row.align === "close" ? "#fef3c7" : row.align === "partial" ? "#fce7f3" : "#fef2f2",
+                        color: row.align === "exact" ? "#166534" : row.align === "close" ? "#92400e" : row.align === "partial" ? "#9d174d" : "#991b1b",
+                      }}>{row.align === "exact" ? "✓ Exact match" : row.align === "close" ? "~ Close" : row.align === "partial" ? "◐ Partial" : "✗ Gap"}</span>
+                      <span style={{ fontSize: 11, color: "#64748b" }}>{row.note}</span>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {/* Key insight: two runners from one graph */}
+      <Card style={{ borderTop: "3px solid #f59e0b" }}>
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>Key Insight: Two Runners, One Graph</h3>
+        <p style={{ fontSize: 13, color: "#475569", lineHeight: 1.7, marginBottom: 16 }}>
+          Jesse's Ascendex GL example defines <strong>two runners</strong> from the same graph: <code style={{ background: "#f1f5f9", padding: "1px 4px", borderRadius: 3, fontSize: 12 }}>quoteAgentRunner</code> (all from mechModel — automated batch for Maestro) and <code style={{ background: "#f1f5f9", padding: "1px 4px", borderRadius: 3, fontSize: 12 }}>raterWorkflowRunner</code> (4 from caller, 1 from mechModel — interactive UW form). Same graph, different projections.
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <div style={{ border: "1px solid #bfdbfe", borderRadius: 8, padding: 16, background: "#eff6ff" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+              <span style={{ fontSize: 16 }}>🤖</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "#1e40af" }}>quoteAgentRunner</span>
+            </div>
+            <div style={{ fontSize: 12, color: "#1e3a5f", lineHeight: 1.6 }}>
+              <p><strong>Context:</strong> Maestro automated quoting</p>
+              <p><strong>All entities from mechModel</strong> — no human input needed</p>
+              <p><strong>Output:</strong> Batch premium calculation, no UI</p>
+              <p style={{ marginTop: 8, color: "#3b82f6", fontStyle: "italic" }}>This runner doesn't produce a workflow — it produces a computation result. The graph drives both interactive and automated paths.</p>
+            </div>
+          </div>
+          <div style={{ border: "1px solid #bbf7d0", borderRadius: 8, padding: 16, background: "#f0fdf4" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+              <span style={{ fontSize: 16 }}>👤</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "#166534" }}>raterWorkflowRunner</span>
+            </div>
+            <div style={{ fontSize: 12, color: "#14532d", lineHeight: 1.6 }}>
+              <p><strong>Context:</strong> Interactive UW form (what we've prototyped)</p>
+              <p><strong>4 entities from caller</strong> (UW-editable) + <strong>1 from mechModel</strong> (DB-sourced)</p>
+              <p><strong>Output:</strong> FormDescriptor → sequential workflow with editable/read-only sections</p>
+              <p style={{ marginTop: 8, color: "#16a34a", fontStyle: "italic" }}>runnerToForm() is the generation algorithm. It uses caller vs mechModel bindings to determine what's editable vs read-only in each step.</p>
+            </div>
+          </div>
+        </div>
+        <div style={{ marginTop: 16, padding: 12, background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8 }}>
+          <p style={{ fontSize: 12, color: "#78350f", lineHeight: 1.6 }}>
+            <strong>Implication for the prototype:</strong> We've been showing only the interactive workflow (raterWorkflowRunner). But the graph also powers Maestro's automated pipeline (quoteAgentRunner). The PM's product definition configures the graph once — both runners consume it. This is the "one product = one rater = one graph" principle in action, and directly addresses the Maestro V2 dependency noted in the project page.
+          </p>
+        </div>
+      </Card>
+
+      {/* runnerToForm = our generation algorithm */}
+      <Card>
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>runnerToForm() = Our Generation Algorithm</h3>
+        <p style={{ fontSize: 13, color: "#475569", lineHeight: 1.7, marginBottom: 16 }}>
+          Jesse's <code style={{ background: "#f1f5f9", padding: "1px 4px", borderRadius: 3, fontSize: 12 }}>runnerToForm()</code> maps directly to our seven generation heuristics. Here's how the FormDescriptor output maps to what we've prototyped:
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+          {[
+            { output: "Editable Sections", source: "from.caller() entities", proto: "Workflow steps with user-input fields (UW fills these in). Our 'account' and 'per-location' scope determines form vs table widget.", color: "#10b981" },
+            { output: "Read-Only Sections", source: "from.mechModel() entities", proto: "Workflow steps with pre-populated data (from DB, API enrichment). Our 'database' and 'api' source fields render as read-only in the preview.", color: "#6b7280" },
+            { output: "Computed Previews", source: ".derive() metadata", proto: "Real-time calculations shown in the workflow — e.g., premium subtotals that update as the UW changes inputs. We show this in the Review & Quote step.", color: "#8b5cf6" },
+            { output: "Guidance", source: ".guidance() entries", proto: "UW recommendations and rules shown alongside fields — help text, risk warnings, override justification prompts. Maps to our helpText and conditions annotations.", color: "#f59e0b" },
+            { output: "Constraints", source: ".constraints() entries", proto: "Field-level validation — min/max values, required fields, conditional required logic. Maps to our conditions and the crime score ≥ 80 exclusion rules.", color: "#ef4444" },
+            { output: "Form Structure", source: "Entity grouping + scope", proto: "How sections are ordered and grouped. Our generation heuristics (scope partitioning, domain clustering, dependency ordering) produce this structure.", color: "#0ea5e9" },
+          ].map(item => (
+            <div key={item.output} style={{ padding: 12, borderRadius: 8, border: "1px solid #e2e8f0", borderTop: `3px solid ${item.color}` }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#1e293b", marginBottom: 4 }}>{item.output}</div>
+              <div style={{ fontSize: 10, fontFamily: "monospace", color: item.color, marginBottom: 8 }}>{item.source}</div>
+              <p style={{ fontSize: 11, color: "#64748b", lineHeight: 1.5 }}>{item.proto}</p>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* Gaps to close */}
+      <Card>
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>Gaps to Close</h3>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {[
+            { gap: "Persist targets not prototyped", desc: ".persist() writes rater results back to storage (genUpsert → DB, lifecycleField → Prisma). Our prototype shows the read/compute side but not the write-back side. Needed for: premium persistence, quote generation, policy issuance.", severity: "medium" },
+            { gap: "assembleInput/assembleOutput not visualized", desc: "Jesse's assembly functions are typed transforms that map entity fields to executor/writer schemas. Our 'Schema Mapping' tab shows static column bindings but doesn't show the runtime transform logic. For the demo, static is fine — for engineering, we need the typed transforms.", severity: "low" },
+            { gap: "Guidance vs form triggers", desc: "Our prototype models form attachment as a trigger edge. Jesse's model uses .guidance() more broadly — including UW recommendations, override prompts, and referral rules. We should expand our edge types to include guidance-type edges that produce UW-facing recommendations, not just form attachment.", severity: "medium" },
+            { gap: "quoteAgentRunner path not shown", desc: "We only prototype the interactive UW workflow. The same graph also generates Maestro's automated pipeline. Showing both projections from one graph would powerfully demonstrate the 'one graph, multiple consumers' principle.", severity: "high" },
+            { gap: "Zod schemas not surfaced", desc: "Jesse uses Zod for type safety on entity schemas. Our Field Inventory shows field types but not as formal schemas. For engineering, each entity in the graph should have a typed schema visible in the Data Graph view.", severity: "low" },
+          ].map(item => (
+            <div key={item.gap} style={{
+              display: "flex", gap: 12, padding: 12, borderRadius: 8, border: "1px solid #e2e8f0",
+              background: item.severity === "high" ? "#fef2f2" : item.severity === "medium" ? "#fffbeb" : "#f8fafc",
+            }}>
+              <span style={{
+                display: "inline-block", fontSize: 10, padding: "2px 8px", borderRadius: 4, fontWeight: 600, height: "fit-content", flexShrink: 0,
+                background: item.severity === "high" ? "#fecaca" : item.severity === "medium" ? "#fde68a" : "#e2e8f0",
+                color: item.severity === "high" ? "#991b1b" : item.severity === "medium" ? "#92400e" : "#475569",
+              }}>{item.severity}</span>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "#1e293b", marginBottom: 4 }}>{item.gap}</div>
+                <p style={{ fontSize: 11, color: "#64748b", lineHeight: 1.5 }}>{item.desc}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Callout color="green" icon="✅" title="Bottom line">
+        <p>Jesse's engineering model confirms the architecture. The graph is the right abstraction. <code>productGraph</code> = our Data Graph. <code>runnerToForm()</code> = our generation algorithm. <code>from.caller()</code> vs <code>from.mechModel()</code> = our account/per-location scope distinction. The highest-value gap to close is showing the <strong>two-runner pattern</strong> — same graph producing both the interactive UW workflow and the automated Maestro pipeline. That's the consolidation thesis in action.</p>
+      </Callout>
+    </div>
+  );
+}
+
+/* ─── Bridge View ─────────────────────────────────────────────────────────── */
+
+/* ─── Progressive Generation View ─────────────────────────────────────────── */
+
+function ProgressiveGenerationView() {
+  const [simStage, setSimStage] = useState(0);
+
+  const stages = [
+    {
+      label: "Rater connected, zero mapping",
+      graphState: { nodes: 35, mapped: 0, edges: 0 },
+      steps: [
+        { label: "Account Fields", fields: 8, confidence: "red", reason: "8 fields detected in Inputs sheet. No semantic identity — can't classify into domains yet.", widget: "Unknown" },
+        { label: "Location Fields", fields: 9, confidence: "red", reason: "Array sheet detected (Inputs_Loc, 10 slots). Fields are per-unit but domains unknown.", widget: "Table (inferred from array)" },
+        { label: "Coverage Fields", fields: 15, confidence: "red", reason: "Mixed-scope sheet detected. Can't split account vs per-location without mapping.", widget: "Unknown" },
+        { label: "Rate Factor Fields", fields: 8, confidence: "red", reason: "Per-location array detected (RateFactors, 10 slots). Domain unknown.", widget: "Table (inferred)" },
+        { label: "Lookup Data", fields: 3, confidence: "yellow", reason: "Lookup table structure detected (Ind_RF). Read-only. No workflow step needed — reference data.", widget: "None (reference)" },
+      ],
+      readiness: 12,
+      insight: "Even with zero mapping, the system already knows: 5 sheets, 2 arrays with 10 slots each, 1 lookup table, and rough field counts. The workflow is a skeleton — but the skeleton is useful. The FDE can see 'here are 5 groups the system found, now let me tell it what they mean.'",
+    },
+    {
+      label: "Schema mapping complete",
+      graphState: { nodes: 35, mapped: 35, edges: 4 },
+      steps: [
+        { label: "1. Overview", fields: 8, confidence: "yellow", reason: "Identification fields found: named_insured, effective_date, entity_type, etc. Grouped by semantic category. Missing: dependency edges not yet validated.", widget: "Form" },
+        { label: "2. Locations", fields: 9, confidence: "yellow", reason: "Per-location fields mapped: address, zip, crime_score, stories, LLC. Driven by num_locations. Missing: Geo API link for crime_score not confirmed.", widget: "Table" },
+        { label: "3. Exposures", fields: 3, confidence: "yellow", reason: "Exposure fields identified: primary/secondary units, sub_industry_class. Missing: no link to industry class lookup yet.", widget: "Table" },
+        { label: "4. Coverages", fields: 15, confidence: "yellow", reason: "Coverage fields split: 8 account + 7 per-location. Missing: crime score → exclusion conditions, form trigger edges.", widget: "Form + Table" },
+        { label: "5. Rate Factors", fields: 8, confidence: "green", reason: "All 8 risk factors mapped as per-location. Array structure confirmed. Domain clear. No downstream dependencies.", widget: "Table" },
+        { label: "6. Forms", fields: 0, confidence: "red", reason: "No form templates connected yet. Step is a placeholder.", widget: "Checklist" },
+        { label: "7. Premium Review", fields: 5, confidence: "green", reason: "Rater output cells mapped. Read-only summary. No dependencies needed.", widget: "Summary" },
+      ],
+      readiness: 52,
+      insight: "Schema mapping gave every field a name and domain. The system now generates 7 recognizable steps. Two are green (Rate Factors and Premium Review — self-contained, no complex dependencies). Most are yellow — structurally correct but missing dependency edges. The FDE's next job is clear: validate the graph edges.",
+    },
+    {
+      label: "Graph edges validated by FDE",
+      graphState: { nodes: 35, mapped: 35, edges: 12 },
+      steps: [
+        { label: "1. Overview", fields: 8, confidence: "green", reason: "num_locations drives Location array. industry_class keys Ind_RF lookup. All identification fields resolved.", widget: "Form" },
+        { label: "2. Locations", fields: 9, confidence: "green", reason: "zip_code → Geo API → crime_score enrichment confirmed. Array driven by num_locations. All location fields mapped and scoped.", widget: "Table" },
+        { label: "3. Exposures", fields: 3, confidence: "green", reason: "sub_industry_class → Ind_RF lookup confirmed. Exposure units linked to industry class base rate.", widget: "Table" },
+        { label: "4. Coverages", fields: 15, confidence: "green", reason: "crime_score ≥ 80 → excludes Habitability and A&B. Account vs per-location split confirmed. All conditions resolved.", widget: "Form + Conditional Table" },
+        { label: "5. Rate Factors", fields: 8, confidence: "green", reason: "LRO/Vacant visibility conditions linked to sub_industry_class. All 8 factors per-location confirmed.", widget: "Table" },
+        { label: "6. Forms", fields: 0, confidence: "red", reason: "Still no form templates connected. Waiting for PM to configure Forms & Documents.", widget: "Checklist" },
+        { label: "7. Premium Review", fields: 5, confidence: "green", reason: "Output mapping complete.", widget: "Summary" },
+      ],
+      readiness: 78,
+      insight: "The FDE's graph work is done. Six of seven steps are green. The only red is Forms — that's the PM's job. Notice: the FDE never built a single workflow step or widget. They mapped fields and validated edges. The system did the rest.",
+    },
+    {
+      label: "PM configures product + forms",
+      graphState: { nodes: 39, mapped: 39, edges: 16 },
+      steps: [
+        { label: "1. Overview", fields: 8, confidence: "green", reason: "Complete. PM reviewed and accepted.", widget: "Form" },
+        { label: "2. Locations", fields: 9, confidence: "green", reason: "Complete. PM added custom 'Additional Insureds' step after this.", widget: "Table" },
+        { label: "2a. Additional Insureds", fields: 2, confidence: "green", reason: "PM-added custom step. Not from rater — manual data collection for endorsement.", widget: "Form", custom: true },
+        { label: "3. Exposures", fields: 3, confidence: "green", reason: "Complete.", widget: "Table" },
+        { label: "4. Coverages", fields: 15, confidence: "green", reason: "PM toggled Habitability ON, A&B ON, HNOA OFF. Graph updated. Form triggers resolved.", widget: "Form + Conditional Table" },
+        { label: "5. Rate Factors", fields: 8, confidence: "green", reason: "Complete.", widget: "Table" },
+        { label: "6. Forms", fields: 4, confidence: "green", reason: "PM connected 4 forms. CG 00 01 mandatory. CG 20 10 triggers on blanket_ai. EBL triggers on ebl_limit > 0. SAM Exclusion triggers on crime_score ≥ 80.", widget: "Conditional Checklist" },
+        { label: "7. Premium Review", fields: 5, confidence: "green", reason: "Complete.", widget: "Summary" },
+      ],
+      readiness: 100,
+      insight: "Product is fully defined. All steps green. PM added one custom step, toggled coverages, configured forms. The workflow regenerated after each change. Ready to publish.",
+    },
+  ];
+
+  const stage = stages[simStage];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      <Card>
+        <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Progressive Generation with Confidence Scoring</h2>
+        <p style={{ fontSize: 13, color: "#64748b", lineHeight: 1.6, marginBottom: 16 }}>
+          The workflow generates continuously — after every graph change. Each step carries a confidence score. The product can't be <strong>published</strong> until everything is green, but both personas can <strong>explore and configure</strong> at any stage. Use the simulator below to see how the workflow evolves.
+        </p>
+
+        {/* Stage selector */}
+        <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
+          {stages.map((s, i) => (
+            <button key={i} onClick={() => setSimStage(i)} style={{
+              flex: 1, padding: "10px 8px", fontSize: 11, fontWeight: simStage === i ? 600 : 400, textAlign: "center",
+              background: simStage === i ? "#1e293b" : "#f1f5f9", color: simStage === i ? "white" : "#64748b",
+              border: "1px solid " + (simStage === i ? "#1e293b" : "#e2e8f0"), borderRadius: 6, cursor: "pointer",
+            }}>{s.label}</button>
+          ))}
+        </div>
+
+        {/* Graph state bar */}
+        <div style={{ display: "flex", gap: 16, marginBottom: 16, padding: 12, background: "#f8fafc", borderRadius: 8 }}>
+          <div style={{ fontSize: 12 }}><strong>{stage.graphState.nodes}</strong> <span style={{ color: "#94a3b8" }}>nodes</span></div>
+          <div style={{ fontSize: 12 }}><strong>{stage.graphState.mapped}</strong> <span style={{ color: "#94a3b8" }}>mapped</span></div>
+          <div style={{ fontSize: 12 }}><strong>{stage.graphState.edges}</strong> <span style={{ color: "#94a3b8" }}>edges</span></div>
+          <div style={{ flex: 1 }} />
+          <div style={{ fontSize: 12, fontWeight: 600 }}>
+            Readiness: <span style={{ color: stage.readiness === 100 ? "#16a34a" : stage.readiness >= 50 ? "#f59e0b" : "#ef4444" }}>{stage.readiness}%</span>
+          </div>
+        </div>
+
+        {/* Readiness bar */}
+        <div style={{ height: 8, background: "#e2e8f0", borderRadius: 4, overflow: "hidden", marginBottom: 20 }}>
+          <div style={{
+            height: "100%", borderRadius: 4, transition: "width 0.5s, background 0.5s",
+            width: `${stage.readiness}%`,
+            background: stage.readiness === 100 ? "#16a34a" : stage.readiness >= 50 ? "#f59e0b" : "#ef4444",
+          }} />
+        </div>
+
+        {/* Generated steps */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {stage.steps.map((step, i) => {
+            const confColors = {
+              green: { bg: "#f0fdf4", border: "#86efac", dot: "#16a34a", text: "#166534" },
+              yellow: { bg: "#fffbeb", border: "#fde68a", dot: "#f59e0b", text: "#92400e" },
+              red: { bg: "#fef2f2", border: "#fecaca", dot: "#ef4444", text: "#991b1b" },
+            };
+            const cc = confColors[step.confidence];
+            return (
+              <div key={i} style={{
+                display: "flex", gap: 12, padding: 12, borderRadius: 8,
+                border: `1px solid ${cc.border}`, background: cc.bg,
+              }}>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                  <span style={{ width: 12, height: 12, borderRadius: "50%", background: cc.dot }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>{step.label}</span>
+                    <span style={{ fontSize: 10, color: "#94a3b8", background: "white", padding: "2px 6px", borderRadius: 3, border: "1px solid #e2e8f0" }}>{step.fields} fields</span>
+                    <span style={{ fontSize: 10, color: "#94a3b8", background: "white", padding: "2px 6px", borderRadius: 3, border: "1px solid #e2e8f0" }}>{step.widget}</span>
+                    {step.custom && <span style={{ fontSize: 9, background: "#dbeafe", color: "#1d4ed8", padding: "2px 5px", borderRadius: 3, fontWeight: 600 }}>PM-added</span>}
+                  </div>
+                  <p style={{ fontSize: 11, color: cc.text, lineHeight: 1.5 }}>{step.reason}</p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Insight */}
+        <div style={{ marginTop: 16, padding: 14, background: "#f0f9ff", border: "1px solid #bfdbfe", borderRadius: 8 }}>
+          <p style={{ fontSize: 12, color: "#1e3a5f", lineHeight: 1.6 }}><strong>What's happening:</strong> {stage.insight}</p>
+        </div>
+      </Card>
+
+      {/* Confidence model */}
+      <Card>
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>Confidence Scoring Model</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
+          {[
+            { color: "#16a34a", bg: "#f0fdf4", border: "#86efac", label: "Green — Ready",
+              criteria: [
+                "All fields in the step have schema mappings",
+                "Scope (account vs per-unit) resolved for every field",
+                "All inbound dependency edges validated",
+                "Widget type determined and appropriate",
+                "No unresolved conditional logic",
+              ],
+              action: "Step is production-ready. Can be published.",
+            },
+            { color: "#f59e0b", bg: "#fffbeb", border: "#fde68a", label: "Yellow — Structurally Correct",
+              criteria: [
+                "Fields are mapped and grouped correctly",
+                "Step exists in the right position",
+                "Some dependency edges missing or unvalidated",
+                "Widget type inferred but may change",
+                "Conditional logic partially resolved",
+              ],
+              action: "Step shape is right, details may shift. FDE needs to validate graph edges.",
+            },
+            { color: "#ef4444", bg: "#fef2f2", border: "#fecaca", label: "Red — Placeholder",
+              criteria: [
+                "Fields detected but not mapped (no semantic identity)",
+                "OR: Step has zero fields (e.g., Forms before PM configures)",
+                "OR: Scope cannot be determined",
+                "OR: Major data source not yet connected",
+              ],
+              action: "Step is a rough guess. Substantial work needed. Shows what's missing.",
+            },
+          ].map(c => (
+            <div key={c.label} style={{ borderRadius: 8, border: `1px solid ${c.border}`, overflow: "hidden" }}>
+              <div style={{ background: c.color, padding: "8px 12px" }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: "white" }}>{c.label}</span>
+              </div>
+              <div style={{ padding: 12, background: c.bg }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "#64748b", marginBottom: 6, textTransform: "uppercase" }}>Criteria</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 10 }}>
+                  {c.criteria.map((cr, i) => (
+                    <div key={i} style={{ fontSize: 11, color: "#475569", lineHeight: 1.4, paddingLeft: 12, textIndent: -12 }}>• {cr}</div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>→ {c.action}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Callout color="green" icon="🔑" title="The publish gate">
+        <p><strong>Explore anytime. Publish only when ready.</strong> Both personas can work with the generated workflow at any confidence level — yellow and red steps are visible, interactive, and useful for planning. But the product can only be published (Draft → Under Filing) when every step is green. This separates the "working" state from the "done" state without gating collaboration.</p>
+      </Callout>
+    </div>
+  );
+}
+
+/* ─── Bridge View (now a Loop) ────────────────────────────────────────────── */
+
+function BridgeView() {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      <Card>
+        <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>The Loop: Rater → Graph → Workflow → Feedback → Graph</h2>
+        <p style={{ fontSize: 13, color: "#64748b", lineHeight: 1.6 }}>
+          This is not a waterfall. It's a feedback loop. The workflow generates after every graph change. Both personas see the consequence of their work in real time. The graph is the shared state; the workflow is a live projection.
+        </p>
+      </Card>
+
+      {/* Loop diagram */}
+      <Card>
+        <div style={{ position: "relative" }}>
+          {/* Center: the graph */}
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 32 }}>
+            <div style={{
+              width: 200, height: 200, borderRadius: "50%",
+              background: "linear-gradient(135deg, #fef3c7 0%, #fde68a 100%)",
+              border: "3px solid #f59e0b",
+              display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+              boxShadow: "0 4px 24px rgba(245, 158, 11, 0.2)",
+            }}>
+              <div style={{ fontSize: 32, marginBottom: 4 }}>🕸️</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#92400e" }}>Data Graph</div>
+              <div style={{ fontSize: 11, color: "#a16207", marginTop: 2 }}>Source of truth</div>
+              <div style={{ fontSize: 10, color: "#a16207", marginTop: 2 }}>Generates continuously</div>
+            </div>
+          </div>
+
+          {/* Four actors around the graph */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            {[
+              {
+                icon: "📊", label: "Rater Parser", color: "#3b82f6", who: "System",
+                writes: "Adds data source nodes with fields, types, cardinality",
+                reads: "—",
+                trigger: "On rater upload or reconnect",
+                arrow: "→ GRAPH",
+              },
+              {
+                icon: "🔗", label: "Schema Mapper + Edge Builder", color: "#8b5cf6", who: "FDE",
+                writes: "Adds semantic mappings (core_column_id), validates/adds dependency edges",
+                reads: "Sees graph nodes, auto-detected edge proposals",
+                trigger: "FDE works interactively; each save updates graph",
+                arrow: "↔ GRAPH",
+              },
+              {
+                icon: "📦", label: "Product Configurator", color: "#10b981", who: "PM",
+                writes: "Toggles coverages (adds/removes nodes), configures form rules (adds edges), sets eligibility (adds constraints)",
+                reads: "Sees generated workflow confidence, coverage options, form library",
+                trigger: "PM works interactively; each toggle updates graph → regenerates workflow",
+                arrow: "↔ GRAPH → WORKFLOW",
+              },
+              {
+                icon: "⚡", label: "Workflow Generator", color: "#f59e0b", who: "System",
+                writes: "Produces sequential step list with confidence scores",
+                reads: "Traverses entire graph: nodes, edges, scope, cardinality, semantic domains",
+                trigger: "Runs after every graph mutation (debounced)",
+                arrow: "GRAPH → WORKFLOW",
+              },
+            ].map(actor => (
+              <div key={actor.label} style={{ border: `2px solid ${actor.color}30`, borderRadius: 10, padding: 16, background: `${actor.color}08` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                  <span style={{ fontSize: 20 }}>{actor.icon}</span>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{actor.label}</div>
+                    <span style={{
+                      fontSize: 10, padding: "2px 6px", borderRadius: 3, fontWeight: 500,
+                      background: actor.who === "System" ? "#dbeafe" : actor.who === "FDE" ? "#e0e7ff" : "#dcfce7",
+                      color: actor.who === "System" ? "#1d4ed8" : actor.who === "FDE" ? "#4338ca" : "#166534",
+                    }}>{actor.who}</span>
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, marginBottom: 6 }}>
+                  <span style={{ color: "#16a34a", fontWeight: 600 }}>Writes:</span> <span style={{ color: "#475569" }}>{actor.writes}</span>
+                </div>
+                <div style={{ fontSize: 11, marginBottom: 6 }}>
+                  <span style={{ color: "#3b82f6", fontWeight: 600 }}>Reads:</span> <span style={{ color: "#475569" }}>{actor.reads}</span>
+                </div>
+                <div style={{ fontSize: 11, marginBottom: 6 }}>
+                  <span style={{ color: "#f59e0b", fontWeight: 600 }}>Trigger:</span> <span style={{ color: "#475569" }}>{actor.trigger}</span>
+                </div>
+                <div style={{ fontSize: 10, color: "#94a3b8", fontFamily: "monospace", marginTop: 4 }}>{actor.arrow}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Card>
+
+      {/* Concrete scenario */}
+      <Card>
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>A Real Iteration Loop</h3>
+        <p style={{ fontSize: 12, color: "#64748b", marginBottom: 16 }}>This is how the FDE and PM actually work — not sequentially, but in a loop mediated by the graph.</p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {[
+            { who: "FDE", action: "Uploads Ascendex GL rater workbook", graphChange: "+35 field nodes, +5 sheet groups, cardinality detected", workflowEffect: "Workflow appears: 5 placeholder steps (all red). Skeleton visible.", color: "#4338ca" },
+            { who: "FDE", action: "Confirms schema mappings for Inputs sheet (8 fields)", graphChange: "+8 semantic mappings. num_locations identified as array driver.", workflowEffect: "Step 1 (Overview) turns yellow. Step 2 (Locations) turns yellow — driven by num_locations.", color: "#4338ca" },
+            { who: "FDE", action: "Maps all remaining fields across 4 sheets", graphChange: "+27 more semantic mappings. All fields now have identity.", workflowEffect: "Steps 1-5 turn yellow. Step 6 (Forms) stays red. Step 7 (Premium) turns green.", color: "#4338ca" },
+            { who: "System", action: "Auto-detects dependency edges from semantic mappings", graphChange: "+4 edges: zip→geo, industry→lookup, num_locations→arrays", workflowEffect: "Steps reorder correctly. Locations before Exposures before Coverages.", color: "#1d4ed8" },
+            { who: "FDE", action: "Validates edges, adds crime score → exclusion logic", graphChange: "+3 conditional edges confirmed", workflowEffect: "Coverage step now shows conditional annotations. Steps 1-5 turn green.", color: "#4338ca" },
+            { who: "PM", action: "Opens Product Definition. Sees 78% readiness. Reviews coverages.", graphChange: "No change yet — PM is exploring", workflowEffect: "PM sees: 5 green steps, 1 red (Forms), 1 green (Premium). Clear what's needed.", color: "#166534" },
+            { who: "PM", action: "Toggles Habitability ON, A&B ON, HNOA OFF", graphChange: "+2 coverage nodes enabled, -1 removed. Downstream edges update.", workflowEffect: "Coverage step regenerates with updated per-location conditions.", color: "#166534" },
+            { who: "PM", action: "Connects 4 form templates, defines attachment rules visually", graphChange: "+4 form nodes, +3 trigger edges (blanket_ai→CG2010, ebl→EBL, crime→SAM)", workflowEffect: "Step 6 (Forms) turns green. All steps green. 100% readiness.", color: "#166534" },
+            { who: "PM", action: "Adds custom 'Additional Insureds' step after Locations", graphChange: "+1 custom step node (manual, not from rater)", workflowEffect: "Step 2a appears. Green immediately — PM-defined, no graph dependencies to resolve.", color: "#166534" },
+            { who: "PM", action: "Previews full UW flow with sample data", graphChange: "No change — read-only traversal", workflowEffect: "All green. Product ready to publish.", color: "#166534" },
+          ].map((step, i) => (
+            <div key={i} style={{ display: "flex", gap: 0, fontSize: 11 }}>
+              <div style={{ width: 60, flexShrink: 0, textAlign: "center", paddingTop: 10 }}>
+                <span style={{
+                  display: "inline-block", padding: "3px 8px", borderRadius: 3, fontWeight: 600, fontSize: 10,
+                  background: step.who === "System" ? "#dbeafe" : step.who === "FDE" ? "#e0e7ff" : "#dcfce7",
+                  color: step.color,
+                }}>{step.who}</span>
+              </div>
+              <div style={{ width: 2, background: "#e2e8f0", flexShrink: 0, margin: "0 12px" }} />
+              <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, padding: "8px 0", borderBottom: "1px solid #f1f5f9" }}>
+                <div><span style={{ fontWeight: 600, color: "#1e293b" }}>{step.action}</span></div>
+                <div style={{ color: "#8b5cf6" }}>{step.graphChange}</div>
+                <div style={{ color: "#0ea5e9" }}>{step.workflowEffect}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "60px 26px 1fr 1fr 1fr", gap: 8, marginTop: 8, paddingTop: 8, borderTop: "2px solid #e2e8f0" }}>
+          <div />
+          <div />
+          <div style={{ fontSize: 10, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase" }}>Action</div>
+          <div style={{ fontSize: 10, fontWeight: 600, color: "#8b5cf6", textTransform: "uppercase" }}>Graph Change</div>
+          <div style={{ fontSize: 10, fontWeight: 600, color: "#0ea5e9", textTransform: "uppercase" }}>Workflow Effect</div>
+        </div>
+      </Card>
+
+      <Callout color="amber" icon="⚡" title="Why loops beat waterfalls">
+        <p>In a gated waterfall, the PM waits for the FDE to finish, then discovers the workflow doesn't match expectations, then asks the FDE to go back and fix the graph. With progressive generation, the PM sees the workflow evolving from step 1. They can give feedback ("why are risk factors in a form instead of a table?") while the FDE is still working. Both personas see the same live artifact — they just interact with it differently.</p>
+      </Callout>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

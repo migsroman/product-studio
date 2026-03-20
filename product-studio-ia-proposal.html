@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Product Studio — IA Proposal</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet" />
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #fff; }
+    * { box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState } = React;
+
+    // ─── Color Palette ──────────────────────────────────────────────────────────
+    const COLORS = {
+      fde: { bg: "#EFF6FF", border: "#BFDBFE", text: "#1E40AF", light: "#DBEAFE", accent: "#3B82F6", badge: "#1D4ED8" },
+      pm: { bg: "#F0FDF4", border: "#BBF7D0", text: "#166534", light: "#DCFCE7", accent: "#22C55E", badge: "#15803D" },
+      shared: { bg: "#FDF4FF", border: "#E9D5FF", text: "#6B21A8", light: "#F3E8FF", accent: "#A855F7", badge: "#7C3AED" },
+      neutral: { bg: "#F9FAFB", border: "#E5E7EB", text: "#374151", light: "#F3F4F6", accent: "#6B7280" },
+      warn: { bg: "#FFFBEB", border: "#FDE68A", text: "#92400E", accent: "#F59E0B" },
+    };
+
+    // ─── Data Model ─────────────────────────────────────────────────────────────
+    const CURRENT_STATE = {
+      module: "Rater Configuration",
+      steps: [
+        {
+          id: "rater", label: "Step 1: Rater Connection", persona: "fde",
+          items: ["Upload workbook / connect endpoint", "Detect inputs & outputs via color coding", "Validate rater schema"],
+        },
+        {
+          id: "mapping", label: "Step 2: Schema Mapping", persona: "fde",
+          items: ["Map rater fields → Federato database columns", "Schema Sense auto-matching", "Semantic category assignment"],
+        },
+        {
+          id: "coverage", label: "Step 3: Product Configuration", persona: "mixed",
+          items: [
+            "Coverage toggles & config (PM concern)",
+            "Field definitions with source types (FDE concern)",
+            "Visibility conditions & option filters (PM concern)",
+            "Source detail paths & schema links (FDE concern)",
+            "Linked field relationships (shared)",
+          ],
+        },
+        {
+          id: "workflow", label: "Step 4: Workflow Builder", persona: "pm",
+          items: ["Assign fields to workflow steps", "Auto-generated vs custom steps", "Field ordering & grouping", "Inherited conditions (read-only from Step 3)"],
+        },
+        {
+          id: "preview", label: "Step 5: Workflow Preview", persona: "pm",
+          items: ["Live underwriter form preview", "Conditional visibility in action", "Option filtering in action"],
+        },
+      ],
+    };
+
+    const PROPOSED_STATE = {
+      modules: [
+        {
+          id: "rater-config", label: "Rater Configuration", persona: "fde", personaLabel: "FDE / Technical",
+          icon: "⚙️",
+          description: "Technical wiring — how data flows into and through the rater",
+          sections: [
+            {
+              label: "Rater Connection",
+              items: ["Upload workbook / connect endpoint", "Detect inputs & outputs", "Validate rater schema"],
+            },
+            {
+              label: "Schema Mapping (Graph)",
+              items: [
+                "Map rater fields → database columns",
+                "Schema Sense auto-matching",
+                "Link Schema Sense configs to each other",
+                "Define dependency chains (field A → API → field B → rater input)",
+                "Internal-to-internal mapping",
+              ],
+              isNew: true,
+            },
+            {
+              label: "Data Source Configuration",
+              items: [
+                "Source types (rater, database, API, submission, user input, form)",
+                "Source detail paths (cell refs, API endpoints)",
+                "Dependency graph visualization",
+                "Transformation definitions (API calls, lookups)",
+              ],
+              isNew: true,
+            },
+          ],
+          williamsQuotes: [
+            "\"This is really more like rater configuration... it's completely different from what a product manager is actually trying to do.\"",
+            "\"All the nodes are just fields in our database and all the edges are effectively transformations or workflows.\"",
+            "\"Schema Sense should be a graph.\"",
+          ],
+        },
+        {
+          id: "product-definition", label: "Product Definition", persona: "pm", personaLabel: "Product Manager",
+          icon: "📋",
+          description: "Business logic — what the product offers and how underwriters interact with it",
+          sections: [
+            {
+              label: "Coverages & Options",
+              items: [
+                "Coverage toggles (liability, comp, collision, etc.)",
+                "Deductible & limit options per coverage",
+                "State-specific coverage rules",
+                "Form attachment rules",
+              ],
+            },
+            {
+              label: "Field Definitions (PM View)",
+              items: [
+                "Available fields (sourced from rater config)",
+                "Visibility conditions (show field X when Y = Z)",
+                "Option-level conditions (filter values by state)",
+                "Linked field relationships",
+                "Choose: show this field OR its upstream inputs",
+              ],
+              isNew: true,
+            },
+            {
+              label: "Workflow Builder",
+              items: [
+                "Assign fields to sequential steps",
+                "Auto-generated vs PM-added steps",
+                "Field ordering & drag-to-reorder",
+                "Unassigned field pool",
+              ],
+            },
+            {
+              label: "Workflow Preview",
+              items: ["Live underwriter form preview", "Conditional visibility", "Option filtering", "Data flow indicators"],
+            },
+          ],
+          williamsQuotes: [
+            "\"They don't care where the fields come from. They care about managing the product — what deductibles do we offer, what coverages.\"",
+            "\"When defining the workflow UI, you need to be able to select: do I want to show this field or the sources of this field?\"",
+          ],
+        },
+      ],
+      handoff: {
+        label: "The Handoff",
+        description: "Rater Config publishes a set of available fields with their dependency graphs resolved. Product Definition consumes those fields as building blocks.",
+        items: [
+          { from: "Rater Config", to: "Product Definition", label: "Available field inventory (names, types, categories)" },
+          { from: "Rater Config", to: "Product Definition", label: "Resolved source metadata (where each field comes from)" },
+          { from: "Rater Config", to: "Product Definition", label: "Dependency graph (which fields feed into which)" },
+          { from: "Product Definition", to: "Rater Config", label: "PM can trigger 'show upstream inputs' — needs graph data" },
+        ],
+      },
+    };
+
+    const SIDEBAR_PROPOSED = [
+      { id: "overview", label: "Overview", icon: "🏠", persona: null },
+      { id: "eligibility", label: "Eligibility Rules", icon: "🛡️", persona: "pm" },
+      { id: "forms", label: "Policy Forms", icon: "📄", persona: "pm" },
+      { id: "rater-config", label: "Rater Configuration", icon: "⚙️", persona: "fde", isChanged: true },
+      { id: "product-definition", label: "Product Definition", icon: "📋", persona: "pm", isNew: true },
+      { id: "lifecycle", label: "Policy Life Cycle", icon: "🔄", persona: "pm" },
+      { id: "layouts", label: "Layouts", icon: "🖼️", persona: null },
+      { id: "versions", label: "Versions", icon: "🌿", persona: null },
+    ];
+
+    // ─── Components ─────────────────────────────────────────────────────────────
+
+    function PersonaBadge({ persona, size = "sm" }) {
+      const config = {
+        fde: { label: "FDE / Technical", color: COLORS.fde },
+        pm: { label: "Product Manager", color: COLORS.pm },
+        mixed: { label: "Mixed Personas", color: COLORS.warn },
+        shared: { label: "Shared", color: COLORS.shared },
+      };
+      const c = config[persona] || config.shared;
+      const sizeStyles = size === "sm"
+        ? { fontSize: "10px", padding: "2px 8px" }
+        : { fontSize: "12px", padding: "4px 10px" };
+      return (
+        <span style={{
+          ...sizeStyles, fontWeight: 600, borderRadius: "9999px", display: "inline-flex", alignItems: "center", gap: "4px",
+          backgroundColor: c.color.light, color: c.color.badge, border: `1px solid ${c.color.border}`,
+        }}>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: c.color.accent, display: "inline-block" }} />
+          {c.label}
+        </span>
+      );
+    }
+
+    function QuoteBlock({ quotes }) {
+      if (!quotes || quotes.length === 0) return null;
+      return (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#9CA3AF", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>William's Feedback</div>
+          {quotes.map((q, i) => (
+            <div key={i} style={{ fontSize: 12, color: "#6B7280", fontStyle: "italic", borderLeft: "2px solid #E5E7EB", paddingLeft: 12, paddingTop: 4, paddingBottom: 4, marginBottom: 6, lineHeight: 1.5 }}>
+              {q}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    function CurrentStateView() {
+      const [expandedStep, setExpandedStep] = useState(null);
+      return (
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+            <div style={{ background: "#F3F4F6", borderRadius: 8, padding: "6px 12px" }}>
+              <span style={{ fontSize: 14, fontWeight: 600, color: "#374151" }}>Single Module: "Rater Configuration"</span>
+            </div>
+            <PersonaBadge persona="mixed" size="md" />
+          </div>
+          <p style={{ fontSize: 12, color: "#6B7280", marginBottom: 20, maxWidth: 560 }}>
+            Everything lives in one sequential flow (Steps 1→5) under one sidebar module. FDE-level schema work and PM-level product decisions are interleaved, especially in Step 3.
+          </p>
+          <div style={{ position: "relative", paddingLeft: 8 }}>
+            <div style={{ position: "absolute", left: 28, top: 32, bottom: 32, width: 2, backgroundColor: "#E5E7EB" }} />
+            {CURRENT_STATE.steps.map((step, idx) => {
+              const isExpanded = expandedStep === step.id;
+              const pc = step.persona === "fde" ? COLORS.fde : step.persona === "pm" ? COLORS.pm : COLORS.warn;
+              return (
+                <div key={step.id} style={{ position: "relative", marginBottom: 12, cursor: "pointer" }}
+                  onClick={() => setExpandedStep(isExpanded ? null : step.id)}>
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                    <div style={{
+                      width: 44, height: 44, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: 14, fontWeight: 700, flexShrink: 0, position: "relative", zIndex: 1,
+                      backgroundColor: pc.light, color: pc.text, border: `2px solid ${pc.border}`,
+                    }}>
+                      {idx + 1}
+                    </div>
+                    <div style={{ flex: 1, paddingTop: 2 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                        <span style={{ fontSize: 14, fontWeight: 600, color: "#1F2937" }}>{step.label}</span>
+                        <PersonaBadge persona={step.persona} />
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" strokeWidth="2"
+                          style={{ transform: isExpanded ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
+                          <polyline points="6 9 12 15 18 9" />
+                        </svg>
+                      </div>
+                      {isExpanded && (
+                        <div style={{ marginTop: 8, paddingBottom: 4 }}>
+                          {step.items.map((item, i) => {
+                            const isFDE = item.includes("(FDE");
+                            const isPM = item.includes("(PM");
+                            const ic = isFDE ? COLORS.fde : isPM ? COLORS.pm : COLORS.neutral;
+                            return (
+                              <div key={i} style={{
+                                display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, borderRadius: 6,
+                                padding: "6px 10px", marginBottom: 4,
+                                backgroundColor: (isFDE || isPM) ? ic.bg : "transparent", color: ic.text,
+                              }}>
+                                <span style={{ flexShrink: 0, color: ic.accent }}>{isFDE ? "🔧" : isPM ? "📋" : "•"}</span>
+                                <span>{item}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{
+            marginTop: 28, borderRadius: 12, padding: 16,
+            backgroundColor: COLORS.warn.bg, border: `1px solid ${COLORS.warn.border}`,
+          }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+              <span style={{ fontSize: 18 }}>⚠️</span>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.warn.text }}>Problem: Persona Bleed</div>
+                <div style={{ fontSize: 12, marginTop: 4, color: COLORS.warn.text, lineHeight: 1.5 }}>
+                  Step 3 mixes technical data mapping (source types, schema paths, dependency chains) with business-level product decisions
+                  (coverage toggles, conditions, form rules). This forces PMs into technical territory and buries business logic inside
+                  rater wiring screens.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function ProposedStateView() {
+      const [expandedModule, setExpandedModule] = useState("rater-config");
+      const [expandedSection, setExpandedSection] = useState(null);
+      return (
+        <div>
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#9CA3AF", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Proposed Sidebar</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {SIDEBAR_PROPOSED.map(item => {
+                const c = item.persona === "fde" ? COLORS.fde : item.persona === "pm" ? COLORS.pm : COLORS.neutral;
+                const isActive = expandedModule === item.id;
+                return (
+                  <button key={item.id}
+                    onClick={() => { if (item.id === "rater-config" || item.id === "product-definition") setExpandedModule(item.id); }}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 8, fontSize: 12, fontWeight: 500,
+                      border: `1px solid ${isActive ? c.text : c.border}`, cursor: "pointer",
+                      backgroundColor: isActive ? c.text : c.bg, color: isActive ? "#fff" : c.text,
+                    }}>
+                    <span>{item.icon}</span>
+                    <span>{item.label}</span>
+                    {item.isNew && <span style={{ fontSize: 9, background: "#22C55E", color: "#fff", padding: "0 6px", borderRadius: 9999, fontWeight: 700 }}>NEW</span>}
+                    {item.isChanged && <span style={{ fontSize: 9, background: "#3B82F6", color: "#fff", padding: "0 6px", borderRadius: 9999, fontWeight: 700 }}>CHANGED</span>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24 }}>
+            {PROPOSED_STATE.modules.map(mod => {
+              const c = mod.persona === "fde" ? COLORS.fde : COLORS.pm;
+              const isActive = expandedModule === mod.id;
+              return (
+                <div key={mod.id} style={{
+                  borderRadius: 12, overflow: "hidden", transition: "all 0.2s",
+                  border: `2px solid ${isActive ? c.accent : c.border}`,
+                  boxShadow: isActive ? `0 0 0 3px ${c.light}` : "none",
+                }}>
+                  <div onClick={() => setExpandedModule(isActive ? null : mod.id)}
+                    style={{ padding: 16, cursor: "pointer", backgroundColor: isActive ? c.bg : "#fff" }}>
+                    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 20 }}>{mod.icon}</span>
+                        <div>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: c.text }}>{mod.label}</div>
+                          <div style={{ fontSize: 12, color: "#6B7280", marginTop: 2 }}>{mod.description}</div>
+                        </div>
+                      </div>
+                      <PersonaBadge persona={mod.persona} size="md" />
+                    </div>
+                  </div>
+                  {isActive && (
+                    <div style={{ borderTop: `1px solid ${c.border}` }}>
+                      {mod.sections.map((section, sIdx) => {
+                        const sKey = `${mod.id}-${sIdx}`;
+                        const sExpanded = expandedSection === sKey;
+                        return (
+                          <div key={sIdx} style={{ borderBottom: `1px solid ${c.border}` }}>
+                            <div onClick={() => setExpandedSection(sExpanded ? null : sKey)}
+                              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", cursor: "pointer" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <div style={{
+                                  width: 24, height: 24, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center",
+                                  fontSize: 10, fontWeight: 700, backgroundColor: c.light, color: c.text,
+                                }}>
+                                  {sIdx + 1}
+                                </div>
+                                <span style={{ fontSize: 13, fontWeight: 500, color: "#1F2937" }}>{section.label}</span>
+                                {section.isNew && <span style={{ fontSize: 9, background: "#10B981", color: "#fff", padding: "0 6px", borderRadius: 9999, fontWeight: 700 }}>NEW</span>}
+                              </div>
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" strokeWidth="2"
+                                style={{ transform: sExpanded ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
+                                <polyline points="6 9 12 15 18 9" />
+                              </svg>
+                            </div>
+                            {sExpanded && (
+                              <div style={{ padding: "0 16px 12px" }}>
+                                {section.items.map((item, i) => (
+                                  <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, color: "#4B5563", marginBottom: 4 }}>
+                                    <span style={{ flexShrink: 0, color: c.accent }}>▸</span>
+                                    <span>{item}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                      <div style={{ padding: "0 16px 16px" }}>
+                        <QuoteBlock quotes={mod.williamsQuotes} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Handoff */}
+          <div style={{ borderRadius: 12, padding: 20, backgroundColor: COLORS.shared.bg, border: `2px solid ${COLORS.shared.border}` }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <span style={{ fontSize: 18 }}>🔗</span>
+              <span style={{ fontSize: 14, fontWeight: 700, color: COLORS.shared.text }}>{PROPOSED_STATE.handoff.label}</span>
+            </div>
+            <p style={{ fontSize: 12, color: "#6B7280", marginBottom: 16 }}>{PROPOSED_STATE.handoff.description}</p>
+            {PROPOSED_STATE.handoff.items.map((item, i) => {
+              const isReverse = item.from === "Product Definition";
+              return (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, marginBottom: 8 }}>
+                  <span style={{
+                    padding: "4px 8px", borderRadius: 4, fontWeight: 500, flexShrink: 0,
+                    backgroundColor: isReverse ? COLORS.pm.light : COLORS.fde.light,
+                    color: isReverse ? COLORS.pm.text : COLORS.fde.text,
+                  }}>{item.from}</span>
+                  <svg width="20" height="12" viewBox="0 0 20 12" fill="none" style={{ flexShrink: 0 }}>
+                    <line x1="0" y1="6" x2="16" y2="6" stroke={COLORS.shared.accent} strokeWidth="1.5" />
+                    <polygon points="20,6 14,2 14,10" fill={COLORS.shared.accent} />
+                  </svg>
+                  <span style={{
+                    padding: "4px 8px", borderRadius: 4, fontWeight: 500, flexShrink: 0,
+                    backgroundColor: isReverse ? COLORS.fde.light : COLORS.pm.light,
+                    color: isReverse ? COLORS.fde.text : COLORS.pm.text,
+                  }}>{item.to}</span>
+                  <span style={{ color: "#6B7280", marginLeft: 4 }}>{item.label}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    function DataFlowDiagram() {
+      const nodes = [
+        { id: "address", x: 50, y: 30, label: "Address", type: "user-input", desc: "UW enters" },
+        { id: "iso_api", x: 230, y: 30, label: "ISO API", type: "transformation", desc: "Schema Sense" },
+        { id: "iso_score", x: 410, y: 30, label: "ISO Score", type: "database", desc: "Stored in DB" },
+        { id: "state", x: 50, y: 120, label: "State", type: "database", desc: "From submission" },
+        { id: "vehicle_class", x: 230, y: 120, label: "Vehicle Class", type: "database", desc: "From DB" },
+        { id: "cost_new", x: 50, y: 210, label: "Cost New", type: "user-input", desc: "UW enters" },
+        { id: "rater", x: 410, y: 140, label: "RATER", type: "rater", desc: "Premium output" },
+      ];
+      const edges = [
+        { from: "address", to: "iso_api" },
+        { from: "iso_api", to: "iso_score" },
+        { from: "iso_score", to: "rater" },
+        { from: "state", to: "rater" },
+        { from: "vehicle_class", to: "rater" },
+        { from: "cost_new", to: "rater" },
+      ];
+      const typeColors = {
+        "user-input": { fill: "#D1FAE5", stroke: "#10B981", text: "#065F46" },
+        "transformation": { fill: "#FEF3C7", stroke: "#F59E0B", text: "#92400E" },
+        "database": { fill: "#DBEAFE", stroke: "#3B82F6", text: "#1E40AF" },
+        "rater": { fill: "#1E293B", stroke: "#475569", text: "#F8FAFC" },
+      };
+      const getCenter = (id) => { const n = nodes.find(n => n.id === id); return { x: n.x + 60, y: n.y + 22 }; };
+
+      return (
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#9CA3AF", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 12 }}>
+            William's Graph Model — Example: ISO Score Dependency Chain
+          </div>
+          <div style={{ background: "#F9FAFB", borderRadius: 12, border: "1px solid #E5E7EB", padding: 20 }}>
+            <svg width="540" height="270" viewBox="0 0 540 270" style={{ display: "block" }}>
+              <defs>
+                <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                  <polygon points="0 0, 8 3, 0 6" fill="#94A3B8" />
+                </marker>
+              </defs>
+              {edges.map((e, i) => {
+                const f = getCenter(e.from), t = getCenter(e.to);
+                return <line key={i} x1={f.x} y1={f.y} x2={t.x} y2={t.y} stroke="#CBD5E1" strokeWidth="1.5" markerEnd="url(#arrowhead)" />;
+              })}
+              {nodes.map(n => {
+                const tc = typeColors[n.type];
+                return (
+                  <g key={n.id}>
+                    <rect x={n.x} y={n.y} width={120} height={44} rx="8" ry="8" fill={tc.fill} stroke={tc.stroke} strokeWidth="1.5" />
+                    <text x={n.x + 60} y={n.y + 18} textAnchor="middle" fill={tc.text} fontSize="11" fontWeight="600">{n.label}</text>
+                    <text x={n.x + 60} y={n.y + 32} textAnchor="middle" fill={tc.text} fontSize="9" opacity="0.7">{n.desc}</text>
+                  </g>
+                );
+              })}
+            </svg>
+            <div style={{ display: "flex", alignItems: "center", gap: 16, marginTop: 12, paddingTop: 12, borderTop: "1px solid #E5E7EB" }}>
+              {[
+                { type: "user-input", label: "User Input (UW)" },
+                { type: "transformation", label: "Transformation (API / Schema Sense)" },
+                { type: "database", label: "Database Field" },
+                { type: "rater", label: "Rater" },
+              ].map(l => (
+                <div key={l.type} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, color: "#6B7280" }}>
+                  <div style={{ width: 12, height: 12, borderRadius: 2, backgroundColor: typeColors[l.type].fill, border: `1px solid ${typeColors[l.type].stroke}` }} />
+                  {l.label}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* PM choice callout */}
+          <div style={{ marginTop: 20, borderRadius: 12, padding: 16, backgroundColor: COLORS.pm.bg, border: `1px solid ${COLORS.pm.border}` }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+              <span style={{ fontSize: 16 }}>💡</span>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.pm.text }}>The PM's Choice</div>
+                <div style={{ fontSize: 12, color: "#4B5563", marginTop: 4, lineHeight: 1.6 }}>
+                  When building the underwriter workflow, the PM sees "ISO Score" as an available field. They can choose:
+                </div>
+                <div style={{ display: "flex", gap: 12, marginTop: 10 }}>
+                  <div style={{ flex: 1, background: "#fff", borderRadius: 8, padding: 12, border: "1px solid #D1D5DB" }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: "#374151", marginBottom: 4 }}>Option A: Show the field directly</div>
+                    <div style={{ fontSize: 11, color: "#6B7280" }}>Display "ISO Crime Score" as a read-only field. The system resolves the value behind the scenes.</div>
+                  </div>
+                  <div style={{ flex: 1, background: "#fff", borderRadius: 8, padding: 12, border: `1px solid ${COLORS.pm.border}` }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.pm.text, marginBottom: 4 }}>Option B: Show upstream inputs</div>
+                    <div style={{ fontSize: 11, color: "#6B7280" }}>Display "Address" as an editable field. The ISO API runs when the UW moves to the next step. The score is derived, not shown.</div>
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: "#6B7280", marginTop: 10, fontStyle: "italic", borderLeft: `2px solid ${COLORS.pm.border}`, paddingLeft: 10 }}>
+                  "You need to be able to select: do I want to show this field or do I want to show the sources of this field?" — William
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ fontSize: 12, color: "#6B7280", lineHeight: 1.6, maxWidth: 560, marginTop: 16 }}>
+            <span style={{ fontWeight: 600, color: "#374151" }}>Key insight:</span> The dependency graph lives in Rater Configuration (FDE territory).
+            The PM never wires it — they just consume the fields and make UX-level decisions about what the underwriter sees.
+          </div>
+        </div>
+      );
+    }
+
+    function KeyDecisions() {
+      const decisions = [
+        {
+          question: "Where do field definitions live?",
+          current: "Mixed into Step 3 alongside coverage toggles",
+          proposed: "Technical source/mapping config in Rater Config; business rules (conditions, options) in Product Definition",
+          williamSays: "\"You're editing the UI, which is not what I'm talking about. I think you should be editing that in the schema mapping itself.\"",
+        },
+        {
+          question: "How does schema mapping work?",
+          current: "Flat table: rater field → database column",
+          proposed: "Graph: Schema Sense configs link to each other. Dependencies chain. Internal-to-internal mapping.",
+          williamSays: "\"You can link schema sense schemas to each other... this field is populated by the output field of this schema sense config.\"",
+        },
+        {
+          question: "What does the PM see for each field?",
+          current: "Full source detail, schema paths, and conditions all in one panel",
+          proposed: "Available fields with resolved types. PM chooses: show this field or its upstream inputs. Conditions & business rules only.",
+          williamSays: "\"You need to select: do I want to show this field or do I want to show the sources of this field?\"",
+        },
+        {
+          question: "Is the flow sequential (1→2→3→4)?",
+          current: "Yes, strict step progression within one module",
+          proposed: "Rater Config and Product Definition are parallel modules, not sequential steps. Within each, steps may not be strictly linear.",
+          williamSays: "\"It might not make sense, especially when you start thinking about maintaining this.\"",
+        },
+        {
+          question: "Where does the dependency graph live?",
+          current: "No graph — flat field-to-column mapping",
+          proposed: "In Rater Config. Schema Sense configs link to each other. Nodes = DB fields, edges = transformations.",
+          williamSays: "\"Schema Sense should be a graph. All the nodes are just fields in our database and all the edges are effectively transformations or workflows.\"",
+        },
+      ];
+
+      return (
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#9CA3AF", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 12 }}>Key Decisions</div>
+          {decisions.map((d, i) => (
+            <div key={i} style={{ borderRadius: 8, border: "1px solid #E5E7EB", overflow: "hidden", marginBottom: 12 }}>
+              <div style={{ background: "#F9FAFB", padding: "10px 16px" }}>
+                <span style={{ fontSize: 14, fontWeight: 600, color: "#1F2937" }}>{d.question}</span>
+              </div>
+              <div style={{ padding: "12px 16px" }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 8 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "#9CA3AF", background: "#F3F4F6", padding: "2px 6px", borderRadius: 4, flexShrink: 0, marginTop: 1 }}>NOW</span>
+                  <span style={{ fontSize: 12, color: "#6B7280" }}>{d.current}</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 8 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "#fff", background: "#059669", padding: "2px 6px", borderRadius: 4, flexShrink: 0, marginTop: 1 }}>NEXT</span>
+                  <span style={{ fontSize: 12, color: "#374151", fontWeight: 500 }}>{d.proposed}</span>
+                </div>
+                <div style={{ fontSize: 12, color: "#9CA3AF", fontStyle: "italic", borderLeft: "2px solid #E5E7EB", paddingLeft: 8, marginTop: 6 }}>{d.williamSays}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ─── Main ───────────────────────────────────────────────────────────────────
+
+    function App() {
+      const [view, setView] = useState("proposed");
+      const tabs = [
+        { id: "current", label: "Current State", icon: "📍" },
+        { id: "proposed", label: "Proposed Split", icon: "✨" },
+        { id: "graph", label: "Data Flow Graph", icon: "🔀" },
+        { id: "decisions", label: "Key Decisions", icon: "🎯" },
+      ];
+
+      return (
+        <div style={{ minHeight: "100vh", backgroundColor: "#fff" }}>
+          <div style={{ borderBottom: "1px solid #E5E7EB", background: "#fff", position: "sticky", top: 0, zIndex: 10 }}>
+            <div style={{ maxWidth: 900, margin: "0 auto", padding: "16px 24px" }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+                <div>
+                  <h1 style={{ fontSize: 18, fontWeight: 700, color: "#111827", margin: 0 }}>Product Studio — Information Architecture Proposal</h1>
+                  <p style={{ fontSize: 13, color: "#6B7280", marginTop: 4 }}>
+                    Separating Rater Configuration (FDE) from Product Definition (PM) — based on William's March 17 feedback
+                  </p>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, marginTop: 4 }}>
+                  <PersonaBadge persona="fde" size="md" />
+                  <PersonaBadge persona="pm" size="md" />
+                </div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 16 }}>
+                {tabs.map(tab => (
+                  <button key={tab.id} onClick={() => setView(tab.id)}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", fontSize: 13, fontWeight: 500,
+                      borderRadius: "8px 8px 0 0", cursor: "pointer", border: "none",
+                      borderBottom: `2px solid ${view === tab.id ? "#111827" : "transparent"}`,
+                      color: view === tab.id ? "#111827" : "#6B7280",
+                      backgroundColor: view === tab.id ? "#F9FAFB" : "transparent",
+                    }}>
+                    <span>{tab.icon}</span> {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div style={{ maxWidth: 900, margin: "0 auto", padding: "24px 24px 48px" }}>
+            {view === "current" && <CurrentStateView />}
+            {view === "proposed" && <ProposedStateView />}
+            {view === "graph" && <DataFlowDiagram />}
+            {view === "decisions" && <KeyDecisions />}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.render(<App />, document.getElementById("root"));
+  </script>
+</body>
+</html>
